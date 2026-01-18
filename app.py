@@ -9,17 +9,61 @@ from analysis.expander import expand_queries
 from analysis.taxonomy import TAXONOMY_RULES
 from analysis.scorer import build_issues_from_docs
 
+import requests
+
+
+def build_slack_message(profile, issues, top_n: int = 30, link_n: int = 5) -> str:
+    lines = []
+    lines.append(f"*[{profile.brand} - {profile.product}]* {profile.target} / {profile.age_range}")
+    lines.append(f"*최근 관심사/걱정/문제 후보 TOP {top_n}*")
+    lines.append("")
+
+    for i, it in enumerate(issues[:top_n], 1):
+        lines.append(f"{i:02d}. ({it.category}) {it.phrase}  | score={it.score:.2f}")
+
+    lines.append("")
+    lines.append(f"*상위 7개 이슈 + 관련 링크(최대 {link_n}개)*")
+    lines.append("")
+
+    top7 = issues[:7]
+    for i, it in enumerate(top7, 1):
+        lines.append(f"*[{i}]* ({it.category}) {it.phrase}  | score={it.score:.2f}")
+
+        links = []
+        for ev in it.evidence:
+            if isinstance(ev, str) and ev.startswith("http"):
+                links.append(ev)
+
+        if links:
+            for j, url in enumerate(links[:link_n], 1):
+                lines.append(f"   • {url}")
+        else:
+            # 링크가 없으면(예: Trends) 근거 텍스트 일부
+            for j, ev in enumerate(it.evidence[:link_n], 1):
+                lines.append(f"   • {ev}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def post_to_slack(webhook_url: str, text: str) -> bool:
+    # Slack Incoming Webhook payload
+    payload = {"text": text}
+    try:
+        r = requests.post(webhook_url, json=payload, timeout=10)
+        return 200 <= r.status_code < 300
+    except requests.RequestException:
+        return False
+
 
 def main():
     cfg = AppConfig()
 
-    # 1) 쿼리 확장(롱테일)
     expanded = expand_queries(PROFILE.seed_queries, max_out=80)
 
-    # 2) 소스 초기화
     sources = []
 
-    # (A) 네이버 검색 API (가장 추천)
     if cfg.naver_client_id and cfg.naver_client_secret:
         sources.append(NaverSearchSource(
             client_id=cfg.naver_client_id,
@@ -30,13 +74,9 @@ def main():
     else:
         print("[WARN] NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 환경변수가 없어 네이버 검색 API를 스킵합니다.")
 
-    # (B) Google Trends (되면 쓰고, 막히면 캐시/백오프로 완화)
     sources.append(GoogleTrendsSource())
-
-    # (C) RSS (육아/교육 특화 피드 여러 개)
     sources.append(RssNewsSource(feeds=cfg.rss_feeds))
 
-    # 3) 수집
     docs = []
     for src in sources:
         try:
@@ -44,7 +84,7 @@ def main():
         except Exception as e:
             print(f"[WARN] source failed: {getattr(src, 'name', 'unknown')} -> {e}")
 
-    # 4) RSS는 게이트 키워드로 완화 필터
+    # RSS gate
     rss_gate_words = set()
     for kws in TAXONOMY_RULES.values():
         for kw in kws:
@@ -68,7 +108,6 @@ def main():
         print(f"[DEBUG] docs_by_source={by_src}")
         print("[DEBUG] sample_titles:", [x.title for x in filtered_docs[:8]])
 
-    # 5) 이슈 생성
     issues = build_issues_from_docs(filtered_docs, PROFILE.taxonomy_boost, cfg.source_weights)
 
     print(f"\n[{PROFILE.brand} - {PROFILE.product}] {PROFILE.target} / {PROFILE.age_range}")
@@ -80,15 +119,13 @@ def main():
         print("- RSS 피드가 일시적으로 비었을 수 있어요.")
         return
 
-    # TOP 30 키워드 출력
     for i, it in enumerate(issues[:30], 1):
         print(f"{i:02d}. ({it.category}) {it.phrase}  | score={it.score:.2f}")
 
-    # ✅ 상위 5개 이슈 + 관련 링크(중복 제거된 evidence에서 링크만 추출)
-    print("\n상위 5개 이슈 + 관련 링크(중복 제거)\n")
-
-    top5 = issues[:5]
-    for i, it in enumerate(top5, 1):
+    # ✅ 상위 7개 이슈 + 관련 링크 출력
+    print("\n상위 7개 이슈 + 관련 링크(중복 제거)\n")
+    top7 = issues[:7]
+    for i, it in enumerate(top7, 1):
         print(f"[{i}] ({it.category}) {it.phrase}  | score={it.score:.2f}")
 
         links = []
@@ -100,18 +137,20 @@ def main():
             for j, url in enumerate(links[:5], 1):
                 print(f"   - {j}. {url}")
         else:
-            # 링크가 없으면(예: Trends) 타이틀/키워드를 근거로 표시
             for j, ev in enumerate(it.evidence[:5], 1):
                 print(f"   - {j}. {ev}")
+        print()
 
-        print()  # 줄바꿈
-
-    # 상위 1개 근거 링크 샘플(디버그)
-    if cfg.debug and issues:
-        top = issues[0]
-        print("\n[DEBUG] Top issue evidence samples:")
-        for ev in top.evidence[:5]:
-            print("-", ev)
+    # ✅ Slack 전송 (웹훅이 설정되어 있으면)
+    slack_text = build_slack_message(PROFILE, issues, top_n=30, link_n=5)
+    if cfg.slack_webhook_url:
+        ok = post_to_slack(cfg.slack_webhook_url, slack_text)
+        if ok:
+            print("[INFO] Slack 전송 완료")
+        else:
+            print("[WARN] Slack 전송 실패(웹훅 URL/네트워크/권한 확인 필요)")
+    else:
+        print("[INFO] SLACK_WEBHOOK_URL 환경변수가 없어 Slack 전송을 스킵합니다.")
 
 
 if __name__ == "__main__":
