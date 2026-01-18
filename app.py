@@ -17,7 +17,7 @@ def build_slack_message_top7(profile, issues, top_n: int = 7, link_n: int = 5) -
     Slack에는 '상위 7개 이슈 + 관련 링크'만 보내기.
     """
     lines = []
-    lines.append(f"*[{profile.brand} - {profile.product}]* {profile.target} / {profile.age_range}")
+    lines.append(f"✅ *{profile.product}*와 관련된 최근 이슈입니다! 콘텐츠 기획에 참고하셔도 좋습니다!")
     lines.append(f"*상위 {top_n}개 이슈 + 관련 링크(최대 {link_n}개)*")
     lines.append("")
 
